@@ -2,7 +2,7 @@
 
 ![Ralph](ralph.webp)
 
-Ralph is an autonomous AI agent loop that runs AI coding tools ([Amp](https://ampcode.com) or [Claude Code](https://docs.anthropic.com/en/docs/claude-code)) repeatedly until all PRD items are complete. Each iteration is a fresh instance with clean context. Memory persists via git history, `progress.txt`, and `prd.json`.
+Ralph is an autonomous AI agent loop that runs AI coding tools ([Amp](https://ampcode.com), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), or Codex CLI) repeatedly until all PRD items are complete. Each iteration is a fresh instance with clean context. Memory persists via git history, `progress.txt`, and `prd.json`.
 
 Based on [Geoffrey Huntley's Ralph pattern](https://ghuntley.com/ralph/).
 
@@ -13,6 +13,7 @@ Based on [Geoffrey Huntley's Ralph pattern](https://ghuntley.com/ralph/).
 - One of the following AI coding tools installed and authenticated:
   - [Amp CLI](https://ampcode.com) (default)
   - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`npm install -g @anthropic-ai/claude-code`)
+  - Codex CLI (`codex --version` should work in your shell)
 - `jq` installed (`brew install jq` on macOS)
 - A git repository for your project
 
@@ -31,6 +32,8 @@ cp /path/to/ralph/ralph.sh scripts/ralph/
 cp /path/to/ralph/prompt.md scripts/ralph/prompt.md    # For Amp
 # OR
 cp /path/to/ralph/CLAUDE.md scripts/ralph/CLAUDE.md    # For Claude Code
+# OR
+cp /path/to/ralph/CODEX.md scripts/ralph/CODEX.md      # For Codex CLI
 
 chmod +x scripts/ralph/ralph.sh
 ```
@@ -115,9 +118,12 @@ This creates `prd.json` with user stories structured for autonomous execution.
 
 # Using Claude Code
 ./scripts/ralph/ralph.sh --tool claude [max_iterations]
+
+# Using Codex CLI
+./scripts/ralph/ralph.sh --tool codex [max_iterations]
 ```
 
-Default is 10 iterations. Use `--tool amp` or `--tool claude` to select your AI coding tool.
+Default is 10 iterations. Use `--tool amp`, `--tool claude`, or `--tool codex` to select your AI coding tool.
 
 Ralph will:
 1. Create a feature branch (from PRD `branchName`)
@@ -133,9 +139,10 @@ Ralph will:
 
 | File | Purpose |
 |------|---------|
-| `ralph.sh` | The bash loop that spawns fresh AI instances (supports `--tool amp` or `--tool claude`) |
+| `ralph.sh` | The bash loop that spawns fresh AI instances (supports `--tool amp`, `--tool claude`, or `--tool codex`) |
 | `prompt.md` | Prompt template for Amp |
 | `CLAUDE.md` | Prompt template for Claude Code |
+| `CODEX.md` | Prompt template for Codex CLI |
 | `prd.json` | User stories with `passes` status (the task list) |
 | `prd.json.example` | Example PRD format for reference |
 | `progress.txt` | Append-only learnings for future iterations |
@@ -162,7 +169,7 @@ npm run dev
 
 ### Each Iteration = Fresh Context
 
-Each iteration spawns a **new AI instance** (Amp or Claude Code) with clean context. The only memory between iterations is:
+Each iteration spawns a **new AI instance** (Amp, Claude Code, or Codex CLI) with clean context. The only memory between iterations is:
 - Git history (commits from previous iterations)
 - `progress.txt` (learnings and context)
 - `prd.json` (which stories are done)
@@ -223,10 +230,92 @@ git log --oneline -10
 
 ## Customizing the Prompt
 
-After copying `prompt.md` (for Amp) or `CLAUDE.md` (for Claude Code) to your project, customize it for your project:
+After copying `prompt.md` (for Amp), `CLAUDE.md` (for Claude Code), or `CODEX.md` (for Codex CLI) to your project, customize it for your project:
 - Add project-specific quality check commands
 - Include codebase conventions
 - Add common gotchas for your stack
+
+You can also override the prompt file entirely:
+
+```bash
+./scripts/ralph/ralph.sh --tool codex --prompt-file path/to/custom-prompt.md 20
+```
+
+And you can isolate loop state per run or per system:
+
+```bash
+./scripts/ralph/ralph.sh --tool codex --state-dir path/to/state --prompt-file path/to/state/CODEX.md 20
+```
+
+That makes Ralph usable for non-PRD loops where the outer "fresh-context each iteration" pattern is still useful.
+
+## Inject Loop Example
+
+This fork includes an Aegis-oriented example under `examples/inject-loop/` for closed-loop fault injection campaigns:
+
+- `examples/inject-loop/CODEX.md` - prompt template for Codex-driven inject-loop rounds
+- `examples/inject-loop/campaign.json.example` - example campaign state file
+- `examples/inject-loop/prompt.template.md` - renderable prompt template for per-system campaign state
+- `examples/inject-loop/init_campaign.py` - initialize one system's campaign state directory
+- `examples/inject-loop/launch_parallel.py` - launch/status/stop multiple Codex loops in parallel
+- `experiments/lib/live_mix.py` - refresh the allowed supported fault space plus live trace mix before each round
+
+Current cluster note:
+
+- HTTP chaos is hard-disabled for inject loops on the current Aegis cluster. Campaigns default `excluded_chaos_types` to `HTTP*`, `live_mix.py` writes a filtered `_supported_candidates.json`, and `validate_round.py` rejects any round that still contains HTTP chaos.
+- `examples/inject-loop/parallel.json.example` - manifest for multi-system parallel runs
+- `experiments/lib/live_mix.py` - refresh live per-system injection / trace mix from Aegis before planning a round
+
+The intended usage is to keep Ralph as the **fresh-agent orchestrator**, while the prompt and campaign state redefine what one iteration means:
+
+- reaping and scoring the latest round
+- refreshing live supported / injected / running fault mix from Aegis
+- enforcing `chaos_type` diversity before candidate selection
+- writing the next `candidates_round<N>.json`
+- submitting through `experiments/lib/submit_dual.py`
+
+Example:
+
+```bash
+cp ralph/examples/inject-loop/campaign.json.example ralph/examples/inject-loop/campaign.json
+./ralph/ralph.sh --tool codex --prompt-file ralph/examples/inject-loop/CODEX.md 12
+```
+
+For per-system parallel loops, initialize one state directory per system and then launch them together:
+
+```bash
+python3 ralph/examples/inject-loop/init_campaign.py \
+  --state-dir ralph/examples/inject-loop/campaigns/trainticket \
+  --loop-dir experiments/trainticket-loop \
+  --duration-minutes 10 \
+  --migrate-rounds
+
+python3 ralph/examples/inject-loop/init_campaign.py \
+  --state-dir ralph/examples/inject-loop/campaigns/teastore \
+  --loop-dir experiments/teastore-loop \
+  --duration-minutes 15
+
+python3 experiments/lib/live_mix.py \
+  --campaign ralph/examples/inject-loop/campaigns/trainticket/campaign.json \
+  --refresh-supported
+
+python3 ralph/examples/inject-loop/launch_parallel.py \
+  launch \
+  --dry-run \
+  --manifest ralph/examples/inject-loop/parallel.json
+```
+
+Each system gets its own:
+
+- `campaign.json`
+- `CODEX.md`
+- `progress.txt`
+- `codex.loop.log`
+- `codex.pid`
+
+That separation avoids progress/log collisions when several Codex loops run at once.
+
+By default `launch_parallel.py` skips campaigns whose `campaign.json` status is not `running`. Use `--include-paused` only when you intentionally want to start paused systems.
 
 ## Archiving
 

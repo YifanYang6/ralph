@@ -1,11 +1,13 @@
 #!/bin/bash
 # Ralph Wiggum - Long-running AI agent loop
-# Usage: ./ralph.sh [--tool amp|claude] [max_iterations]
+# Usage: ./ralph.sh [--tool amp|claude|codex] [--prompt-file PATH] [--state-dir PATH] [max_iterations]
 
 set -e
 
 # Parse arguments
 TOOL="amp"  # Default to amp for backwards compatibility
+PROMPT_FILE=""
+STATE_DIR=""
 MAX_ITERATIONS=10
 
 while [[ $# -gt 0 ]]; do
@@ -16,6 +18,22 @@ while [[ $# -gt 0 ]]; do
       ;;
     --tool=*)
       TOOL="${1#*=}"
+      shift
+      ;;
+    --prompt-file)
+      PROMPT_FILE="$2"
+      shift 2
+      ;;
+    --prompt-file=*)
+      PROMPT_FILE="${1#*=}"
+      shift
+      ;;
+    --state-dir)
+      STATE_DIR="$2"
+      shift 2
+      ;;
+    --state-dir=*)
+      STATE_DIR="${1#*=}"
       shift
       ;;
     *)
@@ -29,15 +47,61 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Validate tool choice
-if [[ "$TOOL" != "amp" && "$TOOL" != "claude" ]]; then
-  echo "Error: Invalid tool '$TOOL'. Must be 'amp' or 'claude'."
+if [[ "$TOOL" != "amp" && "$TOOL" != "claude" && "$TOOL" != "codex" ]]; then
+  echo "Error: Invalid tool '$TOOL'. Must be 'amp', 'claude', or 'codex'."
   exit 1
 fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PRD_FILE="$SCRIPT_DIR/prd.json"
-PROGRESS_FILE="$SCRIPT_DIR/progress.txt"
-ARCHIVE_DIR="$SCRIPT_DIR/archive"
-LAST_BRANCH_FILE="$SCRIPT_DIR/.last-branch"
+if [[ -z "$STATE_DIR" ]]; then
+  STATE_DIR="$SCRIPT_DIR"
+elif [[ "$STATE_DIR" != /* ]]; then
+  STATE_DIR="$PWD/$STATE_DIR"
+fi
+mkdir -p "$STATE_DIR"
+
+PRD_FILE="$STATE_DIR/prd.json"
+PROGRESS_FILE="$STATE_DIR/progress.txt"
+ARCHIVE_DIR="$STATE_DIR/archive"
+LAST_BRANCH_FILE="$STATE_DIR/.last-branch"
+
+resolve_prompt_path() {
+  local prompt="$1"
+  if [[ -z "$prompt" ]]; then
+    return 1
+  fi
+  if [[ -f "$prompt" ]]; then
+    printf '%s\n' "$prompt"
+    return 0
+  fi
+  if [[ -f "$STATE_DIR/$prompt" ]]; then
+    printf '%s\n' "$STATE_DIR/$prompt"
+    return 0
+  fi
+  if [[ -f "$SCRIPT_DIR/$prompt" ]]; then
+    printf '%s\n' "$SCRIPT_DIR/$prompt"
+    return 0
+  fi
+  return 1
+}
+
+if [[ -z "$PROMPT_FILE" ]]; then
+  case "$TOOL" in
+    amp)
+      PROMPT_FILE="$SCRIPT_DIR/prompt.md"
+      ;;
+    claude)
+      PROMPT_FILE="$SCRIPT_DIR/CLAUDE.md"
+      ;;
+    codex)
+      PROMPT_FILE="$SCRIPT_DIR/CODEX.md"
+      ;;
+  esac
+else
+  PROMPT_FILE="$(resolve_prompt_path "$PROMPT_FILE")" || {
+    echo "Error: Prompt file '$PROMPT_FILE' not found."
+    exit 1
+  }
+fi
 
 # Archive previous run if branch changed
 if [ -f "$PRD_FILE" ] && [ -f "$LAST_BRANCH_FILE" ]; then
@@ -79,7 +143,7 @@ if [ ! -f "$PROGRESS_FILE" ]; then
   echo "---" >> "$PROGRESS_FILE"
 fi
 
-echo "Starting Ralph - Tool: $TOOL - Max iterations: $MAX_ITERATIONS"
+echo "Starting Ralph - Tool: $TOOL - State: $STATE_DIR - Prompt: $PROMPT_FILE - Max iterations: $MAX_ITERATIONS"
 
 for i in $(seq 1 $MAX_ITERATIONS); do
   echo ""
@@ -89,10 +153,13 @@ for i in $(seq 1 $MAX_ITERATIONS); do
 
   # Run the selected tool with the ralph prompt
   if [[ "$TOOL" == "amp" ]]; then
-    OUTPUT=$(cat "$SCRIPT_DIR/prompt.md" | amp --dangerously-allow-all 2>&1 | tee /dev/stderr) || true
-  else
+    OUTPUT=$(amp --dangerously-allow-all < "$PROMPT_FILE" 2>&1 | tee /dev/stderr) || true
+  elif [[ "$TOOL" == "claude" ]]; then
     # Claude Code: use --dangerously-skip-permissions for autonomous operation, --print for output
-    OUTPUT=$(claude --dangerously-skip-permissions --print < "$SCRIPT_DIR/CLAUDE.md" 2>&1 | tee /dev/stderr) || true
+    OUTPUT=$(claude --dangerously-skip-permissions --print < "$PROMPT_FILE" 2>&1 | tee /dev/stderr) || true
+  else
+    # Codex CLI: non-interactive exec mode with low-friction sandboxed execution.
+    OUTPUT=$(codex exec --full-auto < "$PROMPT_FILE" 2>&1 | tee /dev/stderr) || true
   fi
   
   # Check for completion signal
